@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 
-from .nn import conv_nd, normalization, linear, zero_module
+from .nn import conv_nd, normalization, linear, zero_module, checkpoint
 
 """
 Unet model architecture
@@ -130,8 +130,8 @@ class ResBlock(TimeBlock):
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
-    def forward(self):
-        return
+    def forward(self, x):
+        return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x, emb):
         """
@@ -168,7 +168,7 @@ class AttentionBlock(nn.Module):
     add output layer which would also be initially zeroed out
     """
 
-    def __init__(self, channels, num_heads, use_checkpoint):
+    def __init__(self, channels, num_heads=1, use_checkpoint=False):
         super().__init__()
 
         self.norm = normalization(channels)
@@ -179,6 +179,9 @@ class AttentionBlock(nn.Module):
         self.proj_out = nn.Sequential(
             zero_module(conv_nd(1, channels, self.use_checkpoint))
         )
+
+    def forward(self, x):
+        return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x):
         b, c, *w_h = x.shape
