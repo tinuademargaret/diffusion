@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
@@ -75,17 +76,19 @@ class ResBlock(TimeBlock):
         self,
         channels,
         emb_dim,
-        dims,
-        out_channels,
-        use_scale_shift_norm,
         dropout,
-        use_conv,
-        use_checkpoint,
+        dims=2,
+        out_channels=None,
+        use_scale_shift_norm=False,
+        use_conv=False,
+        use_checkpoint=False,
     ):
         super().__init__()
         self.channels = channels
         self.emb_dim = emb_dim
-        self.out_channels = out_channels
+        self.out_channels = (
+            out_channels or channels
+        )  # to change the number of channels or not
         self.use_scale_shift_norm = use_scale_shift_norm
         self.dropout = dropout
         self.use_conv = use_conv
@@ -155,18 +158,53 @@ class ResBlock(TimeBlock):
         return self.skip_conection(x) + h
 
 
-class AttentionBlock:
+class AttentionBlock(nn.Module):
     """
-    QK, KV circuits
-
-    create  attention pattern i.e a weighing of how much a destination pixel is important to a source pixel
-    move the information from a destination token to a source token
-
-    An attention bl
-
+    reshape x from b,c,w,h -> b,c,(wh) flatten 2d image to 1d
+    normalize x and apply transformation to x to get b,3*c,(w*h);to generate different features for q, k, and v simultaneously
+    reshape the transformation from b,3*c,(w*h) -> b*num_heads, (c*3) ,(w*h) to create n num_heads each of q, k, v
+    compute attention pattern
+    reshape back to normal
+    add output layer which would also be initially zeroed out
     """
 
-    pass
+    def __init__(self, channels, num_heads, use_checkpoint):
+        super().__init__()
+
+        self.norm = normalization(channels)
+        self.qkv = conv_nd(1, channels, channels * 3, 1)
+        self.num_heads = num_heads
+        self.attention = QKVAttention()
+        self.use_checkpoint = use_checkpoint
+        self.proj_out = nn.Sequential(
+            zero_module(conv_nd(1, channels, self.use_checkpoint))
+        )
+
+    def _forward(self, x):
+        b, c, *w_h = x.shape
+        x = x.reshape(
+            b, c, -1
+        )  # x initallly has 4d shape (batch_size, channels, width, height)
+        qkv = self.qkv(self.norm(x))
+        qkv = qkv.reshape(b * self.num_heads, -1, qkv[2])  # flattens the qkv split
+        h = self.attention(qkv)
+        h = h.reshape(b, -1, h.shape[-1])
+        h = self.proj_out(h)
+        return (x + h).reshape(b, c, *w_h)
+
+
+class QKVAttention(nn.Module):
+    """Computes attention pattern"""
+
+    def forward(self, qkv):
+        ch = qkv.shape[1] // 3
+        q, k, v = torch.split(qkv, ch, dim=1)
+        scale = 1 / math.sqrt(math.sqrt(ch))
+        weight = torch.einsum("bct,bcs->bts", q * scale, k * scale)
+        weight = torch.softmax(weight.float(), dim=-1).type(
+            weight.dtype
+        )  # converts the weights to a probability distribution
+        return torch.einsum("bts,bcs->bct", weight, v)
 
 
 class UNetModel(nn.Module):
