@@ -3,10 +3,36 @@ import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 
-from .nn import conv_nd, normalization, linear, zero_module, checkpoint
+from .nn import conv_nd, normalization, linear, zero_module, checkpoint, avg_pool_nd
 
 """
 Unet model architecture
+
+Each Relu(3x3conv) block = Resblock + Attnblock
+
+    Input blocks
+    image -> Relu(3x3conv) -> Relu(3x3conv)
+    2x2maxpool
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2maxpool
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2maxpool
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2maxpool
+    Relu(3x3conv) -> Relu(3x3conv)
+
+    Middle blocks
+    1x1conv
+
+    Outputblocks
+    2x2 conv
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2 conv
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2 conv
+    Relu(3x3conv) -> Relu(3x3conv)
+    2x2 conv
+    Relu(3x3conv) -> Relu(3x3conv)->2x2 conv
 
 nn.Module features
     Normalization
@@ -25,7 +51,11 @@ Building blocks
         convolution
         actual_attention
         conv
-    Downsample
+    Downsample (downsampling either using convolution or avgpooling)
+        if use_conv
+            conv(dims, channels, channels, 3,)
+
+
     Upsample
 
 Unet Class
@@ -60,6 +90,25 @@ class TimeEmbedSequential(nn.Sequential, TimeBlock):
             else:
                 x = layer(x)
         return x
+
+
+class Downsample(nn.Module):
+    """ """
+
+    def __init__(self, channels, use_conv, dims=2):
+        super().__init__()
+        self.channels = channels
+        self.use_conv = use_conv
+        self.dims = dims
+        stride = 2 if dims != 3 else (1, 2, 2)
+        if use_conv:
+            self.op = conv_nd(dims, channels, channels, 3, stride=stride, padding=1)
+        else:
+            self.op = avg_pool_nd(stride)
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+        return self.op(x)
 
 
 class ResBlock(TimeBlock):
@@ -212,35 +261,44 @@ class QKVAttention(nn.Module):
 
 class UNetModel(nn.Module):
     """
-    Each Relu(3x3conv) block = Resblock + Attnblock
-
-    Input blocks
-    image -> Relu(3x3conv) -> Relu(3x3conv)
-    2x2maxpool
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2maxpool
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2maxpool
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2maxpool
-    Relu(3x3conv) -> Relu(3x3conv)
-
-    Middle blocks
-    1x1conv
-
-    Outputblocks
-    2x2 conv
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2 conv
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2 conv
-    Relu(3x3conv) -> Relu(3x3conv)
-    2x2 conv
-    Relu(3x3conv) -> Relu(3x3conv)->2x2 conv
+    in_channels: channels in input tensor
+    multi_channels: channel multipliers for the model layers
+    model_channels: base channel internal model layers
+    out_channels: channels in the output tensor
+    num_res_block: number residual blocks per downsample
+    attention_resolutions: a collection of when attention would be used during downsampling
+    dropout: the dropout probability
+    conv_resample: use learned convolution for downsampling and upsampling if True
+    use_scale_shift_norm: a specific way to combine the image and time embeddings
+    use_checkpoint: use checkoint optimization
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        in_channels,
+        model_channels,
+        out_channels,
+        num_res_blocks,
+        attention_resolutions,
+        multi_channels=(1, 2, 4, 8),
+        dropout=0,
+        conv_resample=True,
+        dims=2,
+        use_scale_shift_norm=False,
+        use_checkpoint=False,
+        num_heads=1,
+    ):
         super().__init()
+        self.in_channels = in_channels
+        self.multi_channels = multi_channels
+        self.num_res_block = num_res_blocks
+        self.out_channel = out_channels
+        self.attention_resolutions = attention_resolutions
+        self.dropout = dropout
+        self.conv_resample = conv_resample
+        self.use_scale_shift_norm = use_scale_shift_norm
+        self.use_checkpoint = use_checkpoint
+        self.num_heads = num_heads
 
         """
         Params
@@ -252,7 +310,7 @@ class UNetModel(nn.Module):
             attn_resolns -> 
             num_heads -> attn layer
             use_scale_shift_norm -> determines how to condition the images with the timestep
-            dropout ->
+            dropout ->s
             attention_ds -> when to start including attention layers in unet
 
         time embed layer(simple mlp)
@@ -287,6 +345,52 @@ class UNetModel(nn.Module):
             normalize
             conv
         """
+        time_embed_dim = model_channels * 4
+        # inner model channel size
+        self.model_channels = model_channels
+        # we'll index this layer with a scalar time step value to get a time vector
+        self.time_embed = nn.Sequential(
+            linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            time_embed_dim,
+            time_embed_dim,
+        )
+
+        self.input_blocks = nn.ModuleList(
+            [
+                TimeEmbedSequential(
+                    conv_nd(2, self.in_channels, self.model_channels, 3, padding=1)
+                )
+            ]
+        )
+        ds = 1
+        ch = self.model_channels
+        for level, mult in enumerate(self.multi_channels):
+            for _ in range(self.num_res_blocks):
+                layers = [
+                    ResBlock(
+                        self.model_channels,
+                        time_embed_dim,
+                        self.dropout,
+                        mult * self.model_channels,
+                        use_conv=self.conv_resample,
+                        use_scale_shift_norm=self.use_scale_shift_norm,
+                    )
+                ]
+            ch *= mult
+            if ds in self.attention_resolutions:
+                layers.append(
+                    AttentionBlock(
+                        ch,
+                        use_checkpoint=self.use_checkpoint,
+                        num_heads=self.num_heads,
+                    )
+                )
+            self.input_blocks.append(TimeEmbedSequential(*layers))
+        if level != len(self.multi_channels) - 1:
+            self.input_blocks.append(
+                TimeEmbedSequential(Downsample(ch, self.conv_resample, dims=dims))
+            )
 
     def forward(self):
         """
