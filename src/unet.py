@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
+import torch.nn.functional as F
 
 from .nn import conv_nd, normalization, linear, zero_module, checkpoint, avg_pool_nd
 
@@ -109,6 +110,31 @@ class Downsample(nn.Module):
     def forward(self, x):
         assert x.shape[1] == self.channels
         return self.op(x)
+
+
+class Upsample(nn.Module):
+    """Interpolation is a method of generating new data points fromfrom a range of known data points"""
+
+    def __init__(self, channels, use_conv, dims=2):
+        super().__init__()
+        self.channels = channels
+        self.use_conv = use_conv
+        self.dims = dims
+        if self.use_conv:
+            self.conv = conv_nd(dims, channels, channels, 3, padding=1)
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+
+        if self.dims == 3:
+            x = F.interpolate(
+                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+            )
+        else:
+            x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if self.use_conv:
+            x = self.conv(x)
+        return x
 
 
 class ResBlock(TimeBlock):
