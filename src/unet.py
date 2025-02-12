@@ -417,6 +417,27 @@ class UNetModel(nn.Module):
             self.input_blocks.append(
                 TimeEmbedSequential(Downsample(ch, self.conv_resample, dims=dims))
             )
+            ds *= 2
+
+        self.middle_block = TimeEmbedSequential(
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                dims=dims,
+                use_checkpoint=use_checkpoint,
+                use_scale_shift_norm=use_scale_shift_norm,
+            ),
+            AttentionBlock(ch, use_checkpoint=use_checkpoint, num_heads=num_heads),
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                dims=dims,
+                use_checkpoint=use_checkpoint,
+                use_scale_shift_norm=use_scale_shift_norm,
+            ),
+        )
 
     def forward(self):
         """
