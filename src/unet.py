@@ -481,6 +481,12 @@ class UNetModel(nn.Module):
                 )
                 ds //= 2
 
+        self.out = nn.Sequential(
+            normalization(ch),
+            F.SiLU(),
+            zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
+        )
+
     def forward(self):
         """
         get emb
