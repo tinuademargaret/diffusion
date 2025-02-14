@@ -2,6 +2,7 @@
 Customized nn modules
 """
 
+import math
 import torch
 import torch.nn as nn
 
@@ -100,3 +101,23 @@ def avg_pool_nd(dims, *args, **kwargs):
     elif dims == 3:
         return nn.AvgPool3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
+
+
+def timestep_embedding(timesteps, dim, max_period=10000):
+    half = dim / 2
+
+    # creates frequencies that follows an exponential decay
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32)
+        / half
+    ).to(device=timesteps.device)
+    # make dimensions match for matrix multiplication and then scale the frequencies by the timestep
+    args = timesteps[:, None] * freqs[None]
+    # concatenate sine and cosine values of the scaled timesteps
+    embeddings = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    # what is this dong btw?
+    if embeddings % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+
+    return embedding
