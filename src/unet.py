@@ -4,7 +4,15 @@ import torch.nn as nn
 from abc import ABC, abstractmethod
 import torch.nn.functional as F
 
-from .nn import conv_nd, normalization, linear, zero_module, checkpoint, avg_pool_nd
+from .nn import (
+    conv_nd,
+    normalization,
+    linear,
+    zero_module,
+    checkpoint,
+    avg_pool_nd,
+    timestep_embedding,
+)
 
 """
 Unet model architecture
@@ -380,12 +388,11 @@ class UNetModel(nn.Module):
         time_embed_dim = model_channels * 4
         # inner model channel size
         self.model_channels = model_channels
-        # we'll index this layer with a scalar time step value to get a time vector
+        # this is just a linear transformation of the timestep embedding
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
-            time_embed_dim,
-            time_embed_dim,
+            linear(time_embed_dim, time_embed_dim),
         )
 
         self.input_blocks = nn.ModuleList(
@@ -402,7 +409,7 @@ class UNetModel(nn.Module):
             for _ in range(self.num_res_blocks):
                 layers = [
                     ResBlock(
-                        ch,
+                        ch,  # the first time in this loop ch is going to be the number of channels from the previous level
                         time_embed_dim,
                         self.dropout,
                         dims=dims,
@@ -411,7 +418,7 @@ class UNetModel(nn.Module):
                         use_scale_shift_norm=self.use_scale_shift_norm,
                     )
                 ]
-                ch *= mult
+                ch = mult * model_channels
                 if ds in self.attention_resolutions:
                     layers.append(
                         AttentionBlock(
@@ -422,12 +429,12 @@ class UNetModel(nn.Module):
                     )
                 self.input_blocks.append(TimeEmbedSequential(*layers))
                 input_block_chans.append(ch)
-        if level != len(self.multi_channels) - 1:
-            self.input_blocks.append(
-                TimeEmbedSequential(Downsample(ch, self.conv_resample, dims=dims))
-            )
-            input_block_chans.append(ch)
-            ds *= 2
+            if level != len(self.multi_channels) - 1:
+                self.input_blocks.append(
+                    TimeEmbedSequential(Downsample(ch, self.conv_resample, dims=dims))
+                )
+                input_block_chans.append(ch)
+                ds *= 2
 
         self.middle_block = TimeEmbedSequential(
             ResBlock(
@@ -455,7 +462,8 @@ class UNetModel(nn.Module):
                 layers = []
                 layers.append(
                     ResBlock(
-                        ch + input_block_chans.pop(),
+                        ch
+                        + input_block_chans.pop(),  # in the first loop at i == 0, ch is the no of channels in the last layer of the input block
                         time_embed_dim,
                         dropout,
                         dims=dims,
@@ -473,13 +481,13 @@ class UNetModel(nn.Module):
                             use_checkpoint=use_checkpoint,
                         )
                     )
-                self.output_block.append(TimeEmbedSequential(*layers))
+                # self.output_block.append(TimeEmbedSequential(*layers))
 
             if level and i == num_res_blocks:
-                self.output_block.append(
-                    TimeEmbedSequential(Upsample(ch, conv_resample, dims=dims))
-                )
+                # actually it matters that we do it this way unlike the way we do it in the input blocks, because of how we do the forwrd pass
+                layers.append(Upsample(ch, conv_resample, dims=dims))
                 ds //= 2
+            self.output_block.append(TimeEmbedSequential(*layers))
 
         self.out = nn.Sequential(
             normalization(ch),
@@ -487,7 +495,15 @@ class UNetModel(nn.Module):
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
 
-    def forward(self):
+    # don't scam us you've not exlained this to us :)
+    @property
+    def inner_dtype(self):
+        """
+        Get the dtype used by the torso of the model.
+        """
+        return next(self.input_blocks.parameters()).dtype
+
+    def forward(self, x, timesteps):
         """
         get emb
         h = InputModuleList(x, emb)
@@ -495,3 +511,15 @@ class UNetModel(nn.Module):
         h = OuputModuleList(h, emb)
         return out(h)
         """
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        hs = []
+        h = x.type(self.inner_dtype)
+        for module in self.input_blocks:
+            h = module(h, emb)
+            # store output h so we can concatenate it to the input of the output blocks
+            hs.append(h)
+        h = self.middle_block(h, emb)
+        for module in self.output_block:
+            h = module(torch.cat([h, hs.pop()], dim=1), emb)
+        h = h.type(x.dtype)
+        return self.out(h)
