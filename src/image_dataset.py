@@ -1,7 +1,7 @@
 from PIL import Image
 import blobfile as bf
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 
 def _list_image_files_recursively(data_dir):
@@ -51,3 +51,25 @@ class ImageDataset(Dataset):
         arr = arr.astype(np.float32) / 127.5 - 1
 
         return np.transpose(arr, [2, 0, 1]), {}
+
+
+def load_data(*, data_dir, image_size, batch_size, deterministic=False):
+
+    if not data_dir:
+        raise ValueError("unspecified data directory")
+
+    all_files = _list_image_files_recursively(data_dir)
+
+    dataset = ImageDataset(image_size, all_files)
+
+    if deterministic:
+        loader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=False, drop_last=True
+        )
+    else:
+        loader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=False, drop_last=True
+        )
+
+    while True:
+        yield from loader
