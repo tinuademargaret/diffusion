@@ -18,3 +18,13 @@ class ScheduleSampler(ABC):
         weights_np = 1 / (len(p) * p[timesteps_np])
         weights = torch.from_numpy(weights_np).float().to(device)
         return timesteps, weights
+
+
+class UniformSampler(ScheduleSampler):
+
+    def __init__(self, diffusion):
+        self.diffusion = diffusion
+        self._weights = np.ones([diffusion.num_timesteps])
+
+    def weights(self):
+        return self._weights

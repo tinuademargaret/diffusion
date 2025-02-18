@@ -39,7 +39,7 @@ def _extract_into_tensor(arr, timestep, broadcast_shape):
     res = torch.from_numpy(arr).to(device=timestep.device)[timestep].float()
 
     while len(res.shape) < len(broadcast_shape):
-        res = res[:, ..., None]
+        res = res[..., None]
 
     return res.expand(broadcast_shape)
 
