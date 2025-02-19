@@ -4,6 +4,16 @@ import torch
 from abc import ABC, abstractmethod
 
 
+def create_named_schedule_sampler(name, diffusion):
+
+    if name == "uniform":
+        return UniformSampler(diffusion)
+    elif name == "loss-second-moment":
+        return LossSecondMomentResampler(diffusion)
+    else:
+        raise NotImplementedError(f"Unknown schedule sampler {name}")
+
+
 class ScheduleSampler(ABC):
 
     @abstractmethod
