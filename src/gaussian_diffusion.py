@@ -57,10 +57,35 @@ class GaussianDiffusion:
         alphas = 1.0 - betas
 
         self.alphas_cum_prod = np.cumprod(alphas, axis=0)
+        # right shift
+        self.alphas_cum_prod_prev = np.append(1.0, self.alphas_cum_prod[:-1])
+        # left shift
+        self.alphas_cum_prod_next = np.append(self.alphas_cum_prod[1:], 0.0)
 
+        # terms or the prior q{xt|xt-1}
         self.sqrt_alphas_cum_prod = np.sqrt(self.alphas_cum_prod)
-
         self.sqrt_one_minus_alphas_cum_prod = np.sqrt(1.0 - self.alphas_cum_prod)
+
+        # terms for the posterior q{xt-1 | xt, x0}
+        self.posterior_variance = self.betas * (
+            (1.0 - self.alphas_cum_prod_prev) / (1.0 - self.alphas_cum_prod)
+        )
+        self.posterior_log_variance_clipped = np.log(
+            np.append(self.posterior_variance[1], self.posterior_variance[1:])
+        )
+        # coefficient of x0 in the mean
+        self.posterior_mean_coeff1 = self.betas * (
+            np.sqrt(self.alphas_cum_prod_prev) / (1.0 - self.alphas_cum_prod)
+        )
+        # coefficient of xt in the mean
+        self.posterior_mean_coeff2 = (
+            np.sqrt(alphas) * (1.0 - self.alphas_cum_prod_prev)
+        ) / (1.0 - self.alphas_cum_prod)
+
+    def _scale_timesteps(self, t):
+        if self.rescale_timesteps:
+            return t.float() * (1000.0 / self.num_timesteps)
+        return t
 
     def q_sample(self, x_start, t, noise=None):
 
@@ -73,3 +98,35 @@ class GaussianDiffusion:
             _extract_into_tensor(self.sqrt_one_minus_alphas_cum_prod, t, x_start.shape)
             * noise
         )
+
+    def q_posterior_mean_varience(self, x_start, x_t, t):
+
+        posterior_mean = (
+            _extract_into_tensor(self.posterior_mean_coeff1, t, x_t.shape) * x_start
+        ) + (_extract_into_tensor(self.posterior_mean_coeff2, t, x_t.shape) * x_t)
+
+        posterior_variance = _extract_into_tensor(self.posterior_variance, t, x_t.shape)
+
+        posterior_log_variance_clipped = _extract_into_tensor(
+            self.posterior_log_variance_clipped, t, x_t.shape
+        )
+
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+
+    def p_mean_variance(self, model, x, t, model_kwargs=None):
+
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        B, C = x.shape[:2]
+
+        model_output = model(x, self._scale_timesteps(t), **model_kwargs)
+        # split model output to noise and variance
+        model_output, model_var_values = torch.split(model_output, C, dim=1)
+
+        min_log = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
+        max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
+
+        frac = (model_var_values + 1) / 2
+        model_log_variance = frac * max_log + (1 - frac) * min_log
+        model_variance = torch.exp(model_log_variance)

@@ -229,7 +229,7 @@ class ResBlock(TimeBlock):
 
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
-
+        # emprically found to work better , but based on what intuition?
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = torch.chunk(emb_out, 2, dim=1)
