@@ -65,6 +65,9 @@ class GaussianDiffusion:
         # terms or the prior q{xt|xt-1}
         self.sqrt_alphas_cum_prod = np.sqrt(self.alphas_cum_prod)
         self.sqrt_one_minus_alphas_cum_prod = np.sqrt(1.0 - self.alphas_cum_prod)
+        # mathematically the same as 1/self.sqrt_alphas_cum_prod probably computed this way for numerical statbility
+        self.sqrt_recip_alpha_cum_prod = np.sqrt(1.0 / self.sqrt_alphas_cum_prod)
+        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / self.alphas_cum_prod - 1)
 
         # terms for the posterior q{xt-1 | xt, x0}
         self.posterior_variance = self.betas * (
@@ -87,6 +90,16 @@ class GaussianDiffusion:
             return t.float() * (1000.0 / self.num_timesteps)
         return t
 
+    # training model's output as the noise, use this mean to predict x_start
+    # using the formula from q_sample and rearranging it to calculate for x_start
+    def _predict_xstart_from_eps(self, x_t, t, eps):
+        return (
+            _extract_into_tensor(self.sqrt_recip_alpha_cum_prod, t, x_t.shape)
+            * x_t  # undo the scaling when we sampled
+            - _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+            * eps  # remove the noise
+        )
+
     def q_sample(self, x_start, t, noise=None):
 
         if not noise:
@@ -99,7 +112,7 @@ class GaussianDiffusion:
             * noise
         )
 
-    def q_posterior_mean_varience(self, x_start, x_t, t):
+    def q_posterior_mean_variance(self, x_start, x_t, t):
 
         posterior_mean = (
             _extract_into_tensor(self.posterior_mean_coeff1, t, x_t.shape) * x_start
@@ -113,7 +126,16 @@ class GaussianDiffusion:
 
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, model, x, t, model_kwargs=None):
+    def p_mean_variance(
+        self, model, x, t, denoised_fn=None, clip_denoised=True, model_kwargs=None
+    ):
+        # wtf is this anyway?
+        def process_x_start(x):
+            if denoised_fn is not None:
+                x == denoised_fn(x)
+            if clip_denoised:
+                return x.clamp(-1, 1)
+            return x
 
         if model_kwargs is None:
             model_kwargs = {}
@@ -130,3 +152,18 @@ class GaussianDiffusion:
         frac = (model_var_values + 1) / 2
         model_log_variance = frac * max_log + (1 - frac) * min_log
         model_variance = torch.exp(model_log_variance)
+
+        # predict x_start using the predicted noise in the model's output
+        pred_xstart = self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
+
+        # use the predicted x_start to get the model's mean
+        model_mean, _, _ = self.q_posterior_mean_variance(
+            x_start=pred_xstart, x_t=x, t=t
+        )
+
+        return {
+            "mean": model_mean,
+            "variance": model_variance,
+            "log_variance": model_log_variance,
+            "pred_xstart": pred_xstart,
+        }
