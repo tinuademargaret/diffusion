@@ -121,3 +121,8 @@ def timestep_embedding(timesteps, dim, max_period=10000):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
 
     return embedding
+
+
+def mean_flat(tensor):
+    "take the mean over all non batch dimnsions"
+    return tensor.mean(dim=list(range(1, len(tensor.shape))))

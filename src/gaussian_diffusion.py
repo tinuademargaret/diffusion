@@ -2,6 +2,9 @@ import math
 import numpy as np
 import torch
 
+from nn import mean_flat
+from losses import normal_kl, discretized_gaussian_log_likelihood
+
 
 def get_named_beta_schedule(schedule_name, num_diffussion_steps):
 
@@ -167,3 +170,59 @@ class GaussianDiffusion:
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
         }
+
+    def _vbd_terms_bpd(
+        self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None
+    ):
+
+        true_mean, _, true_log_var = self.q_posterior_mean_variance(x_start, x_t, t)
+
+        out = self.p_mean_variance(model, x_start, x_t, t, model_kwargs=model_kwargs)
+
+        kl = normal_kl(true_mean, true_log_var, out["mean"], out["log_variance"])
+
+        kl = mean_flat(kl) / np.log(2.0)
+
+        decoder_nll = -discretized_gaussian_log_likelihood(
+            x_start, means=out["mean"], log_scale=0.5 * out["log_variance"]
+        )
+
+        decoder_nll = mean_flat(decoder_nll) / np.log(2.0)
+
+        output = torch.where((t == 0), decoder_nll, kl)
+        return {"ouput": output, "pred_xstart": out["pred_xstart"]}
+
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        if noise is None:
+            noise = torch.randn_like(x_start)
+
+        terms = {}
+
+        x_t = self.q_sample(x_start, t, noise=noise)
+
+        model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+
+        C = x_t.shape[1]
+
+        model_output, model_var = torch.split(model_output, C, dim=1)
+
+        frozen_out = torch.cat([model_output.detach(), model_var], dim=1)
+
+        terms["vlb"] = self._vbd_terms_bpd(
+            model=lambda *args, r=frozen_out: r,
+            x_start=x_start,
+            x_t=x_t,
+            t=t,
+            clip_denoised=False,
+            model_kwargs=model_kwargs,
+        )["output"]
+
+        terms["vlb"] *= self.num_timesteps / 1000.0
+
+        terms["mse"] = mean_flat((noise - model_output) ** 2)
+
+        return terms
