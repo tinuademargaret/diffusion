@@ -171,6 +171,89 @@ class GaussianDiffusion:
             "pred_xstart": pred_xstart,
         }
 
+    def p_sample(
+        self, model, x, t, clip_denoised=True, denoisd_fn=None, model_kwargs=None
+    ):
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_n=denoisd_fn,
+            model_kwargs=model_kwargs,
+        )
+        noise = torch.randn_like(x)
+        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        sample = (
+            out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
+        )
+
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def p_sample_loop_progresive(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        if device is None:
+            device = next(model.parameters()).device
+        if noise is not None:
+            img = noise
+        else:
+            img = torch.radn(*shape, device=device)
+        indices = list(range(self.num_timesteps))[::-1]
+
+        if progress:
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = torch.tensor([i] * shape[0], device=device)
+            with torch.no_grad():
+                out = self.p_sample(
+                    model,
+                    img,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    model_kwargs=model_kwargs,
+                )
+                yield out
+                img = out["sample"]
+
+    def p_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        final = None
+        for sample in self.p_sample_loop_progresive(
+            model,
+            shape,
+            noise,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+        ):
+            final = sample
+        return final["sample"]
+
     def _vbd_terms_bpd(
         self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None
     ):

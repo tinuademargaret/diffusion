@@ -1,5 +1,7 @@
 import os
 import functools
+import torch
+from torch.optim import AdamW
 
 from fp16 import zero_grad
 from .resample import UniformSampler, LossSecondMomentResampler
@@ -21,6 +23,7 @@ class TrainLoop:
         save_interval,
         use_fp16=False,
         schedule_sampler=None,
+        weight_decay=0.0,
         lr_anneal_steps=0
     ) -> None:
         self.model = model
@@ -32,6 +35,7 @@ class TrainLoop:
         self.save_interval = save_interval
         self.use_fp16 = use_fp16
         self.schedule_sampler = schedule_sampler or UniformSampler(diffussion)
+        self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
 
         self.step = 0
@@ -40,6 +44,8 @@ class TrainLoop:
         self.lg_loss_scale = INITIAL_LOG_LOSS_SCALE
 
         self.model_params = list(self.model.parameters())
+
+        self.opt = AdamW(lr=self.lr, weight_decay=self.weight_decay)
 
     def run_loop(self):
         while (
@@ -57,10 +63,7 @@ class TrainLoop:
 
     def run_step(self, batch, cond=None):
         self.forward_backward(batch)
-        if self.use_fp16:
-            self.optimize_fp16()
-        else:
-            self.optimize_normal()
+        self.optimize_normal()
 
     def forward_backward(self, batch, cond=None):
         zero_grad(self.model_params)
@@ -86,3 +89,15 @@ class TrainLoop:
                 (loss * loss_scale).backward()
             else:
                 loss.backward()
+
+    def _anneal_lr(self):
+        if not self.lr_anneal_steps:
+            return
+        frac_done = (self.step + self.resume_step) / self.lr_anneal_step
+        lr = self.lr * (1 - frac_done)
+        for param_group in self.opt.param_groups:
+            param_group["lr"] = lr
+
+    def optimize_normal(self):
+        self._anneal_lr()
+        self.opt.step()
